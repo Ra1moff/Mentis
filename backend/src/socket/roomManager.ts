@@ -43,6 +43,12 @@ export function setupSocketHandlers(io: Server) {
         return;
       }
 
+      // If the socket is already in the room, just sync state and return
+      if (state.players[socket.id]) {
+        socket.emit('roomState', state);
+        return;
+      }
+
       if (state.playerOrder.length >= 2) {
         socket.emit('errorMsg', 'Room is full.');
         return;

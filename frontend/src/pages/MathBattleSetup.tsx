@@ -1,21 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { io, Socket } from 'socket.io-client';
 import { Swords, Bot, Users, Play, Code, AlertCircle, Sparkles, CheckCircle2 } from 'lucide-react';
-import { BACKEND_URL } from '../config';
-
-let socket: Socket | null = null;
-const SOCKET_URL = BACKEND_URL;
+import { getSocket, disconnectSocket } from '../socketManager';
 
 export const MathBattleSetup: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  // Configurations
+  // Game Settings
   const [opponent, setOpponent] = useState<'bot' | 'player'>('bot');
   const [difficulty, setDifficulty] = useState<'Easy' | 'Medium' | 'Hard'>('Medium');
-  const [maxQuestions, setMaxQuestions] = useState<number>(10);
+  const [maxQuestions, setMaxQuestions] = useState(10);
 
   // Multiplayer States
   const [mode, setMode] = useState<'options' | 'create' | 'join' | 'lobby'>('options');
@@ -23,59 +19,57 @@ export const MathBattleSetup: React.FC = () => {
   const [currentRoom, setCurrentRoom] = useState<any>(null);
   const [socketError, setSocketError] = useState('');
   const [countdownVal, setCountdownVal] = useState<string | number | null>(null);
-  const [isJoined, setIsJoined] = useState(false);
-
-  // Cleanup socket on unmount
-  useEffect(() => {
-    return () => {
-      if (socket) {
-        socket.disconnect();
-        socket = null;
-      }
-    };
-  }, []);
+  const [mySocketId, setMySocketId] = useState<string>('');
 
   const initSocket = () => {
-    if (!socket) {
-      socket = io(SOCKET_URL);
-      
-      socket.on('connect_error', () => {
-        setSocketError('Unable to connect to multiplayer server. Make sure backend is running.');
-        setMode('options');
-      });
+    const socket = getSocket();
 
-      socket.on('errorMsg', (msg: string) => {
-        setSocketError(msg);
-        setMode('options');
-      });
+    setMySocketId(socket.id || '');
 
-      socket.on('roomState', (state: any) => {
-        setCurrentRoom(state);
-        setMode('lobby');
-        setSocketError('');
-        
-        // If state.status is playing, redirect to game screen!
-        if (state.status === 'playing') {
-          navigate(`/battle/game?roomId=${state.roomId}`);
-        }
-      });
+    // Clear old listeners
+    socket.off('connect');
+    socket.off('connect_error');
+    socket.off('errorMsg');
+    socket.off('roomState');
+    socket.off('countdown');
+    socket.off('opponentDisconnected');
 
-      socket.on('countdown', (val: any) => {
-        setCountdownVal(val);
-        if (val === 'GO!') {
-          setTimeout(() => {
-            if (currentRoom) {
-              navigate(`/battle/game?roomId=${currentRoom.roomId}`);
-            }
-          }, 800);
-        }
-      });
+    socket.on('connect', () => {
+      setMySocketId(socket.id || '');
+    });
 
-      socket.on('opponentDisconnected', (msg: string) => {
-        setSocketError(msg);
-        setMode('options');
-      });
-    }
+    socket.on('connect_error', () => {
+      setSocketError('Unable to connect to multiplayer server.');
+      setMode('options');
+    });
+
+    socket.on('errorMsg', (msg: string) => {
+      setSocketError(msg);
+      setMode('options');
+    });
+
+    socket.on('roomState', (state: any) => {
+      setCurrentRoom(state);
+      setMode('lobby');
+      setSocketError('');
+    });
+
+    socket.on('countdown', (val: any) => {
+      setCountdownVal(val);
+      if (val === 'GO!') {
+        // Navigate immediately — socket stays alive via socketManager
+        setTimeout(() => {
+          navigate(`/battle/game?roomId=${currentRoom?.roomId || ''}`);
+        }, 500);
+      }
+    });
+
+    socket.on('opponentDisconnected', (msg: string) => {
+      setSocketError(msg);
+      setMode('options');
+    });
+
+    return socket;
   };
 
   const handleStartBotGame = () => {
@@ -83,15 +77,13 @@ export const MathBattleSetup: React.FC = () => {
   };
 
   const handleCreateRoom = () => {
-    initSocket();
+    const socket = initSocket();
     setCountdownVal(null);
-    if (socket) {
-      socket.emit('createRoom', {
-        username: user?.username || 'Player 1',
-        difficulty,
-        maxQuestions,
-      });
-    }
+    socket.emit('createRoom', {
+      username: user?.username || 'Player 1',
+      difficulty,
+      maxQuestions,
+    });
   };
 
   const handleJoinRoom = () => {
@@ -99,21 +91,35 @@ export const MathBattleSetup: React.FC = () => {
       setSocketError('Room code is required.');
       return;
     }
-    initSocket();
+    const socket = initSocket();
     setCountdownVal(null);
-    if (socket) {
-      socket.emit('joinRoom', {
-        roomId: roomCodeInput.trim().toUpperCase(),
-        username: user?.username || 'Player 2',
-      });
-    }
+    socket.emit('joinRoom', {
+      roomId: roomCodeInput.trim().toUpperCase(),
+      username: user?.username || 'Player 2',
+    });
   };
 
   const handleToggleReady = () => {
-    if (socket && currentRoom) {
+    const socket = getSocket();
+    if (currentRoom) {
       socket.emit('playerReady', { roomId: currentRoom.roomId });
     }
   };
+
+  // Update currentRoom ref for countdown navigation
+  useEffect(() => {
+    if (!currentRoom) return;
+    const socket = getSocket();
+    socket.off('countdown');
+    socket.on('countdown', (val: any) => {
+      setCountdownVal(val);
+      if (val === 'GO!') {
+        setTimeout(() => {
+          navigate(`/battle/game?roomId=${currentRoom.roomId}`);
+        }, 500);
+      }
+    });
+  }, [currentRoom]);
 
   return (
     <div className="max-w-4xl mx-auto w-full px-6 py-12 flex-1 flex flex-col justify-center">
@@ -136,10 +142,7 @@ export const MathBattleSetup: React.FC = () => {
                 <label className="text-sm font-semibold uppercase tracking-wider text-game-lightBlue">Choose Opponent</label>
                 <div className="grid grid-cols-2 gap-4">
                   <button
-                    onClick={() => {
-                      setOpponent('bot');
-                      setMode('options');
-                    }}
+                    onClick={() => { setOpponent('bot'); setMode('options'); }}
                     className={`flex items-center justify-center gap-2 p-4 rounded-xl font-bold border transition-all duration-300 ${
                       opponent === 'bot'
                         ? 'bg-game-blue bg-opacity-30 border-game-lightBlue text-game-light scale-102 shadow-lg shadow-game-lightBlue/10'
@@ -149,10 +152,7 @@ export const MathBattleSetup: React.FC = () => {
                     <Bot className="w-5 h-5" /> Versus AI Bot
                   </button>
                   <button
-                    onClick={() => {
-                      setOpponent('player');
-                      setMode('options');
-                    }}
+                    onClick={() => { setOpponent('player'); setMode('options'); }}
                     className={`flex items-center justify-center gap-2 p-4 rounded-xl font-bold border transition-all duration-300 ${
                       opponent === 'player'
                         ? 'bg-game-blue bg-opacity-30 border-game-lightBlue text-game-light scale-102 shadow-lg shadow-game-lightBlue/10'
@@ -269,12 +269,12 @@ export const MathBattleSetup: React.FC = () => {
                   <button
                     onClick={handleToggleReady}
                     className={`py-3.5 font-bold rounded-xl shadow-lg w-full text-base tracking-wider transition-all duration-300 ${
-                      currentRoom?.players[socket?.id || '']?.ready
+                      currentRoom?.players[mySocketId]?.ready
                         ? 'bg-game-green text-game-light'
                         : 'game-btn-primary'
                     }`}
                   >
-                    {currentRoom?.players[socket?.id || '']?.ready ? 'Ready! Waiting...' : 'I Am Ready'}
+                    {currentRoom?.players[mySocketId]?.ready ? 'Ready! Waiting...' : 'I Am Ready'}
                   </button>
                 </div>
               )}
@@ -351,8 +351,7 @@ export const MathBattleSetup: React.FC = () => {
                     </p>
                     <button
                       onClick={() => {
-                        if (socket) socket.disconnect();
-                        socket = null;
+                        disconnectSocket();
                         setMode('options');
                         setCurrentRoom(null);
                       }}

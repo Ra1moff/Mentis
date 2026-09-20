@@ -8,9 +8,7 @@ import confetti from 'canvas-confetti';
 import { Swords, Bot, User, Clock, AlertCircle, ArrowLeft, Trophy, Sparkles, Check, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BACKEND_URL } from '../config';
-
-let socket: Socket | null = null;
-const SOCKET_URL = BACKEND_URL;
+import { getSocket, disconnectSocket } from '../socketManager';
 
 export const MathBattleGame: React.FC = () => {
   const { user, updateLocalStats } = useAuth();
@@ -45,6 +43,7 @@ export const MathBattleGame: React.FC = () => {
 
   // Multiplayer Room State
   const [roomState, setRoomState] = useState<any>(null);
+  const [mySocketId, setMySocketId] = useState<string>('');
 
   // References
   const inputRef = useRef<HTMLInputElement>(null);
@@ -72,13 +71,13 @@ export const MathBattleGame: React.FC = () => {
   // Setup game modes
   useEffect(() => {
     if (isMultiplayer) {
-      // Connect to existing Socket session
-      socket = io(SOCKET_URL);
-      
-      socket.emit('joinRoom', {
-        roomId,
-        username: user?.username || 'Player'
-      });
+      // Reuse the existing socket from socketManager (created in MathBattleSetup)
+      const socket = getSocket();
+      setMySocketId(socket.id || '');
+
+      // Clear previous listeners to avoid duplicates
+      socket.off('roomState');
+      socket.off('countdown');
 
       socket.on('roomState', (state: any) => {
         setRoomState(state);
@@ -91,7 +90,7 @@ export const MathBattleGame: React.FC = () => {
         if (state.players[p2Id]) setP2Score(state.players[p2Id].score);
 
         // Sync question
-        const isP1 = socket?.id === p1Id;
+        const isP1 = socket.id === p1Id;
         const currentIdx = state[isP1 ? 'p1Idx' : 'p2Idx'] || 0;
         
         if (state.status === 'playing') {
@@ -116,7 +115,7 @@ export const MathBattleGame: React.FC = () => {
         if (state.status === 'finished') {
           setIsPlaying(false);
           setWinnerId(state.winnerId);
-          handleFinishGame(state.winnerId === socket?.id, state);
+          handleFinishGame(state.winnerId === mySocketId, state);
         }
       });
 
@@ -128,11 +127,16 @@ export const MathBattleGame: React.FC = () => {
         }
       });
 
+      // Immediately request current room state in case countdown already fired
+      socket.emit('joinRoom', {
+        roomId,
+        username: user?.username || 'Player',
+      });
+
       return () => {
-        if (socket) {
-          socket.disconnect();
-          socket = null;
-        }
+        // Don't disconnect socket here — just remove listeners
+        socket.off('roomState');
+        socket.off('countdown');
       };
     } else {
       // Single Player Vs Bot
@@ -341,6 +345,7 @@ export const MathBattleGame: React.FC = () => {
     if (isNaN(ansNum)) return;
 
     if (isMultiplayer) {
+      const socket = getSocket();
       if (socket) {
         socket.emit('submitAnswer', {
           roomId,
@@ -447,12 +452,12 @@ export const MathBattleGame: React.FC = () => {
           },
           p2Stats: isMultiplayer && serverState
             ? {
-                username: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== socket?.id)?.username || 'Opponent',
-                score: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== socket?.id)?.score || 0,
-                correct: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== socket?.id)?.correctAnswers || 0,
-                wrong: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== socket?.id)?.wrongAnswers || 0,
-                accuracy: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== socket?.id)?.accuracy || 0,
-                bestStreak: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== socket?.id)?.bestStreak || 0,
+                username: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== mySocketId)?.username || 'Opponent',
+                score: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== mySocketId)?.score || 0,
+                correct: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== mySocketId)?.correctAnswers || 0,
+                wrong: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== mySocketId)?.wrongAnswers || 0,
+                accuracy: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== mySocketId)?.accuracy || 0,
+                bestStreak: (Object.values(serverState.players) as any[]).find((p: any) => p.id !== mySocketId)?.bestStreak || 0,
               }
             : {
                 username: 'AI Bot',
@@ -587,7 +592,7 @@ export const MathBattleGame: React.FC = () => {
             </div>
             <div className="text-sm font-bold text-game-light mt-2 max-w-[120px] truncate">
               {isMultiplayer
-                ? (Object.values(roomState?.players || {}) as any[]).find((p: any) => p.id !== socket?.id)?.username || 'Player 2'
+                ? (Object.values(roomState?.players || {}) as any[]).find((p: any) => p.id !== mySocketId)?.username || 'Player 2'
                 : 'AI Bot'}
             </div>
             <div className="text-xs text-game-lightBlue font-semibold mt-0.5">Score: {p2Score}</div>
